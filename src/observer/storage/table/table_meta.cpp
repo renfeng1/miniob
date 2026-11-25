@@ -159,7 +159,10 @@ const IndexMeta *TableMeta::index(const char *name) const
 const IndexMeta *TableMeta::find_index_by_field(const char *field) const
 {
   for (const IndexMeta &index : indexes_) {
-    if (0 == strcmp(index.field(), field)) {
+    // 仅匹配单字段索引。
+    // 复合索引的键由多个字段拼接而成，无法直接用单个字段的值进行范围扫描，
+    // 因此查找索引时跳过复合索引，避免生成错误的索引扫描计划
+    if (index.field_num() == 1 && 0 == strcmp(index.field(), field)) {
       return &index;
     }
   }

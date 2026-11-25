@@ -16,6 +16,7 @@ See the Mulan PSL v2 for more details. */
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "common/lang/string.h"
 #include "common/log/log.h"
@@ -183,6 +184,54 @@ Table *Db::find_table(const char *table_name) const
     return iter->second;
   }
   return nullptr;
+}
+
+RC Db::drop_table(const char *table_name)
+{
+  // 检查表是否存在
+  if (opened_tables_.count(table_name) == 0) {
+    LOG_WARN("%s table not exist. db=%s", table_name, name_.c_str());
+    return RC::SCHEMA_TABLE_NOT_EXIST;
+  }
+
+  Table *table = opened_tables_[table_name];
+  const TableMeta &table_meta = table->table_meta();
+
+  // 先将表的数据和索引刷新到磁盘，保证后面关闭文件时是干净的状态
+  RC rc = table->sync();
+  if (OB_FAIL(rc)) {
+    LOG_WARN("failed to sync table before drop. table=%s.%s, rc=%d:%s", name_.c_str(), table_name, rc, strrc(rc));
+    return rc;
+  }
+
+  // 记录表关联的所有文件路径：索引文件、数据文件、元数据文件
+  vector<string> table_files;
+  for (int i = 0; i < table_meta.index_num(); i++) {
+    const IndexMeta *index_meta = table_meta.index(i);
+    table_files.emplace_back(table_index_file(path_.c_str(), table_name, index_meta->name()));
+  }
+  table_files.emplace_back(table_data_file(path_.c_str(), table_name));
+  table_files.emplace_back(table_meta_file(path_.c_str(), table_name));
+
+  // 从打开表列表中移除并删除表对象。
+  // Table 的析构会关闭 record handler、数据文件的 buffer pool，并删除所有索引对象
+  // （索引对象析构时会关闭索引文件的 buffer pool）
+  opened_tables_.erase(table_name);
+  delete table;
+  table = nullptr;
+
+  // 删除磁盘上的所有关联文件
+  for (const string &file_name : table_files) {
+    if (0 != ::unlink(file_name.c_str())) {
+      LOG_ERROR("Failed to delete file while dropping table. file=%s, errno=%d:%s",
+                file_name.c_str(), errno, strerror(errno));
+      return RC::IOERR_WRITE;
+    }
+    LOG_INFO("Delete file success while dropping table. file=%s", file_name.c_str());
+  }
+
+  LOG_INFO("drop table success. db=%s, table=%s", name_.c_str(), table_name);
+  return RC::SUCCESS;
 }
 
 Table *Db::find_table(int32_t table_id) const

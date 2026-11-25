@@ -23,6 +23,7 @@ See the Mulan PSL v2 for more details. */
 #include "common/lang/memory.h"
 #include "common/lang/sstream.h"
 #include "common/lang/functional.h"
+#include "common/lang/vector.h"
 #include "common/log/log.h"
 #include "sql/parser/parse_defs.h"
 #include "storage/buffer/disk_buffer_pool.h"
@@ -50,35 +51,79 @@ enum class BplusTreeOperationType
 };
 
 /**
+ * @brief 复合索引键中的一个字段的描述
+ * @ingroup BPlusTree
+ * @details 一个复合索引键由多个字段拼接而成，每个字段有自己的类型和长度
+ */
+struct IndexKeySegment
+{
+  AttrType type;
+  int32_t  length;
+};
+
+/// 复合索引键支持的最大字段个数
+static constexpr int MAX_INDEX_KEY_FIELDS = 8;
+
+/**
  * @brief 属性比较(BplusTree)
  * @ingroup BPlusTree
+ * @details 支持复合索引键：按字段顺序逐段比较，每一段使用各自类型的比较规则
  */
 class AttrComparator
 {
 public:
   void init(AttrType type, int length)
   {
-    attr_type_   = type;
+    attr_num_ = 1;
+    attr_types_[0] = type;
+    attr_lengths_[0] = length;
     attr_length_ = length;
   }
 
+  void init(const IndexKeySegment *segments, int segment_num)
+  {
+    if (segment_num > MAX_INDEX_KEY_FIELDS) {
+      segment_num = MAX_INDEX_KEY_FIELDS;
+    }
+    attr_num_ = segment_num;
+    attr_length_ = 0;
+    for (int i = 0; i < segment_num; i++) {
+      attr_types_[i]   = segments[i].type;
+      attr_lengths_[i] = segments[i].length;
+      attr_length_ += segments[i].length;
+    }
+  }
+
   int attr_length() const { return attr_length_; }
+  int attr_num() const { return attr_num_; }
+  AttrType attr_type(int index) const { return attr_types_[index]; }
+  int attr_len(int index) const { return attr_lengths_[index]; }
 
   int operator()(const char *v1, const char *v2) const
   {
-    // TODO: optimized the comparison
-    Value left;
-    left.set_type(attr_type_);
-    left.set_data(v1, attr_length_);
-    Value right;
-    right.set_type(attr_type_);
-    right.set_data(v2, attr_length_);
-    return DataType::type_instance(attr_type_)->compare(left, right);
+    // 按字段顺序逐段比较。如果所有字段都相同则返回0
+    int offset = 0;
+    for (int i = 0; i < attr_num_; i++) {
+      Value left;
+      left.set_type(attr_types_[i]);
+      left.set_data(v1 + offset, attr_lengths_[i]);
+      Value right;
+      right.set_type(attr_types_[i]);
+      right.set_data(v2 + offset, attr_lengths_[i]);
+      int result = DataType::type_instance(attr_types_[i])->compare(left, right);
+      if (result != 0) {
+        return result;
+      }
+      offset += attr_lengths_[i];
+    }
+    return 0;
   }
 
 private:
-  AttrType attr_type_;
-  int      attr_length_;
+  int      attr_num_ = 0;
+  AttrType attr_types_[MAX_INDEX_KEY_FIELDS];
+  int      attr_lengths_[MAX_INDEX_KEY_FIELDS];
+  int      attr_length_ = 0;  ///< 所有字段的长度之和
 };
 
 /**
@@ -90,6 +135,7 @@ class KeyComparator
 {
 public:
   void init(AttrType type, int length) { attr_comparator_.init(type, length); }
+  void init(const IndexKeySegment *segments, int segment_num) { attr_comparator_.init(segments, segment_num); }
 
   const AttrComparator &attr_comparator() const { return attr_comparator_; }
 
@@ -118,21 +164,44 @@ class AttrPrinter
 public:
   void init(AttrType type, int length)
   {
-    attr_type_   = type;
+    segments_.clear();
+    IndexKeySegment segment;
+    segment.type = type;
+    segment.length = length;
+    segments_.push_back(segment);
     attr_length_ = length;
+  }
+
+  void init(const IndexKeySegment *segments, int segment_num)
+  {
+    segments_.clear();
+    attr_length_ = 0;
+    for (int i = 0; i < segment_num; i++) {
+      segments_.push_back(segments[i]);
+      attr_length_ += segments[i].length;
+    }
   }
 
   int attr_length() const { return attr_length_; }
 
   string operator()(const char *v) const
   {
-    Value value(attr_type_, const_cast<char *>(v), attr_length_);
-    return value.to_string();
+    stringstream ss;
+    int offset = 0;
+    for (size_t i = 0; i < segments_.size(); i++) {
+      if (i != 0) {
+        ss << ",";
+      }
+      Value value(segments_[i].type, const_cast<char *>(v + offset), segments_[i].length);
+      ss << value.to_string();
+      offset += segments_[i].length;
+    }
+    return ss.str();
   }
 
 private:
-  AttrType attr_type_;
-  int      attr_length_;
+  vector<IndexKeySegment> segments_;
+  int                     attr_length_ = 0;
 };
 
 /**
@@ -143,6 +212,7 @@ class KeyPrinter
 {
 public:
   void init(AttrType type, int length) { attr_printer_.init(type, length); }
+  void init(const IndexKeySegment *segments, int segment_num) { attr_printer_.init(segments, segment_num); }
 
   const AttrPrinter &attr_printer() const { return attr_printer_; }
 
@@ -164,7 +234,7 @@ private:
  * @brief the meta information of bplus tree
  * @ingroup BPlusTree
  * @details this is the first page of bplus tree.
- * only one field can be supported, can you extend it to multi-fields?
+ * 支持复合索引：file header中记录了键值由哪些字段(段)组成，每段的类型和长度
  */
 struct IndexFileHeader
 {
@@ -176,9 +246,12 @@ struct IndexFileHeader
   PageNum  root_page;          ///< 根节点在磁盘中的页号
   int32_t  internal_max_size;  ///< 内部节点最大的键值对数
   int32_t  leaf_max_size;      ///< 叶子节点最大的键值对数
-  int32_t  attr_length;        ///< 键值的长度
+  int32_t  attr_length;        ///< 键值的长度（复合索引为所有字段长度之和）
   int32_t  key_length;         ///< attr length + sizeof(RID)
-  AttrType attr_type;          ///< 键值的类型
+  AttrType attr_type;          ///< 键值的类型（单字段索引时使用，复合索引时为第一个字段的类型）
+  int32_t  field_num;          ///< 复合索引键的字段个数，单字段索引为1
+  int32_t  field_lengths[MAX_INDEX_KEY_FIELDS];  ///< 每个字段的长度
+  AttrType field_types[MAX_INDEX_KEY_FIELDS];   ///< 每个字段的类型
 
   const string to_string() const
   {
@@ -187,6 +260,7 @@ struct IndexFileHeader
     ss << "attr_length:" << attr_length << ","
        << "key_length:" << key_length << ","
        << "attr_type:" << attr_type_to_string(attr_type) << ","
+       << "field_num:" << field_num << ","
        << "root_page:" << root_page << ","
        << "internal_max_size:" << internal_max_size << ","
        << "leaf_max_size:" << leaf_max_size << ";";
@@ -463,6 +537,15 @@ public:
       int internal_max_size = -1, int leaf_max_size = -1);
   RC create(LogHandler &log_handler, DiskBufferPool &buffer_pool, AttrType attr_type, int attr_length,
       int internal_max_size = -1, int leaf_max_size = -1);
+  RC create(LogHandler &log_handler, DiskBufferPool &buffer_pool, const vector<IndexKeySegment> &key_fields,
+      int internal_max_size = -1, int leaf_max_size = -1);
+
+  /**
+   * @brief 创建一个支持复合键的B+树
+   * @details key_fields 描述了复合键由哪些字段组成，顺序即键值中各字段的顺序
+   */
+  RC create(LogHandler &log_handler, BufferPoolManager &bpm, const char *file_name,
+      const vector<IndexKeySegment> &key_fields, int internal_max_size = -1, int leaf_max_size = -1);
 
   /**
    * @brief 打开一个B+树

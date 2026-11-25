@@ -1,4 +1,4 @@
-/* Copyright (c) 2021 OceanBase and/or its affiliates. All rights reserved.
+/* Copyright (c) 2021 Xie Meiyi(xiemeiyi@hust.edu.cn) and OceanBase and/or its affiliates. All rights reserved.
 miniob is licensed under Mulan PSL v2.
 You can use this software according to the terms and conditions of the Mulan PSL v2.
 You may obtain a copy of Mulan PSL v2 at:
@@ -18,6 +18,7 @@ See the Mulan PSL v2 for more details. */
 #include <vector>
 
 #include "common/sys/rc.h"
+#include "common/lang/vector.h"
 #include "storage/field/field_meta.h"
 #include "storage/index/index_meta.h"
 #include "storage/record/record_manager.h"
@@ -40,10 +41,25 @@ public:
   Index()          = default;
   virtual ~Index() = default;
 
+  /// 创建索引（多字段/复合索引）。keys 数组中的字段顺序即复合键中各字段的顺序
+  virtual RC create(Table *table, const char *file_name, const IndexMeta &index_meta,
+      const vector<FieldMeta> &field_metas)
+  {
+    return RC::UNSUPPORTED;
+  }
+  /// 打开索引（多字段/复合索引）
+  virtual RC open(Table *table, const char *file_name, const IndexMeta &index_meta,
+      const vector<FieldMeta> &field_metas)
+  {
+    return RC::UNSUPPORTED;
+  }
+
+  /// 创建索引（单字段）。保留此接口以兼容向量索引、全文索引等单字段索引
   virtual RC create(Table *table, const char *file_name, const IndexMeta &index_meta, const FieldMeta &field_meta)
   {
     return RC::UNSUPPORTED;
   }
+  /// 打开索引（单字段）
   virtual RC open(Table *table, const char *file_name, const IndexMeta &index_meta, const FieldMeta &field_meta)
   {
     return RC::UNSUPPORTED;
@@ -88,12 +104,34 @@ public:
    */
   virtual RC sync() = 0;
 
-protected:
+public:
+  /// 初始化（多字段）
+  RC init(const IndexMeta &index_meta, const vector<FieldMeta> &field_metas);
+  /// 初始化（单字段）
   RC init(const IndexMeta &index_meta, const FieldMeta &field_meta);
 
+  /// @brief 索引中所有字段的长度之和，也就是复合键的总长度
+  int key_length() const;
+
+  /// @brief 索引包含的字段个数
+  int field_num() const { return static_cast<int>(field_metas_.size()); }
+
+  /**
+   * @brief 从一条记录中抽取索引键值
+   * @details 单字段索引时键值就是该字段的数据；复合索引时按字段顺序将各字段数据拼接起来
+   * @param record 输入的记录数据
+   * @param key    输出的键值，长度为key_length()
+   */
+  RC make_key(const char *record, vector<char> &key) const;
+
+  /**
+   * @brief 比较两条记录在当前索引上的键值是否相同
+   */
+  bool same_key(const char *record1, const char *record2) const;
+
 protected:
-  IndexMeta index_meta_;  ///< 索引的元数据
-  FieldMeta field_meta_;  ///< 当前实现仅考虑一个字段的索引
+  IndexMeta         index_meta_;   ///< 索引的元数据
+  vector<FieldMeta> field_metas_;  ///< 索引包含的字段，支持复合索引；当前至少包含一个字段
 };
 
 /**

@@ -49,9 +49,13 @@ RC ParseStage::handle_request(SQLStageEvent *sql_event)
   unique_ptr<ParsedSqlNode> sql_node = std::move(parsed_sql_result.sql_nodes().front());
   if (sql_node->flag == SCF_ERROR) {
     // set error information to event
+    // NOTE: 这里不要设置 state_string。plain_communicator 在 state_string 为空时
+    // 会根据返回码向客户端返回 "SUCCESS" 或 "FAILURE"。
+    // 如果在这里设置了 state_string，客户端会看到 "SUCCESS > Failed to parse sql"，
+    // 而不是预期的 "FAILURE"。
     rc = RC::SQL_SYNTAX;
     sql_result->set_return_code(rc);
-    sql_result->set_state_string("Failed to parse sql");
+    sql_result->set_state_string("");
     return rc;
   }
 

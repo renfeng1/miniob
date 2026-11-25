@@ -185,13 +185,14 @@ struct AnalyzeTableSqlNode
  * @brief 描述一个create index语句
  * @ingroup SQLParser
  * @details 创建索引时，需要指定索引名，表名，字段名。
- * 正常的SQL语句中，一个索引可能包含了多个字段，这里仅支持一个字段。
+ * 支持复合索引：一个索引可以包含多个字段
  */
 struct CreateIndexSqlNode
 {
-  string index_name;      ///< Index name
-  string relation_name;   ///< Relation name
-  string attribute_name;  ///< Attribute name
+  string           index_name;                        ///< Index name
+  string           relation_name;                     ///< Relation name
+  string           attribute_name;                    ///< Attribute name（兼容保留，单字段时与attribute_names[0]相同）
+  vector<string>   attribute_names;                   ///< 索引包含的所有字段，复合索引包含多个字段
 };
 
 /**

@@ -795,9 +795,24 @@ RC BplusTreeHandler::sync()
 
 RC BplusTreeHandler::create(LogHandler &log_handler,
                             BufferPoolManager &bpm,
-                            const char *file_name, 
-                            AttrType attr_type, 
-                            int attr_length, 
+                            const char *file_name,
+                            AttrType attr_type,
+                            int attr_length,
+                            int internal_max_size /* = -1*/,
+                            int leaf_max_size /* = -1 */)
+{
+  IndexKeySegment segment;
+  segment.type   = attr_type;
+  segment.length = attr_length;
+  vector<IndexKeySegment> key_fields;
+  key_fields.push_back(segment);
+  return create(log_handler, bpm, file_name, key_fields, internal_max_size, leaf_max_size);
+}
+
+RC BplusTreeHandler::create(LogHandler &log_handler,
+                            BufferPoolManager &bpm,
+                            const char *file_name,
+                            const vector<IndexKeySegment> &key_fields,
                             int internal_max_size /* = -1*/,
                             int leaf_max_size /* = -1 */)
 {
@@ -817,7 +832,7 @@ RC BplusTreeHandler::create(LogHandler &log_handler,
   }
   LOG_INFO("Successfully open index file %s.", file_name);
 
-  rc = this->create(log_handler, *bp, attr_type, attr_length, internal_max_size, leaf_max_size);
+  rc = this->create(log_handler, *bp, key_fields, internal_max_size, leaf_max_size);
   if (OB_FAIL(rc)) {
     bpm.close_file(file_name);
     return rc;
@@ -834,6 +849,31 @@ RC BplusTreeHandler::create(LogHandler &log_handler,
             int internal_max_size /* = -1 */,
             int leaf_max_size /* = -1 */)
 {
+  IndexKeySegment segment;
+  segment.type   = attr_type;
+  segment.length = attr_length;
+  vector<IndexKeySegment> key_fields;
+  key_fields.push_back(segment);
+  return create(log_handler, buffer_pool, key_fields, internal_max_size, leaf_max_size);
+}
+
+RC BplusTreeHandler::create(LogHandler &log_handler,
+            DiskBufferPool &buffer_pool,
+            const vector<IndexKeySegment> &key_fields,
+            int internal_max_size /* = -1 */,
+            int leaf_max_size /* = -1 */)
+{
+  if (key_fields.empty()) {
+    LOG_WARN("Failed to create bplus tree, no key field.");
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // 计算复合键的总长度
+  int attr_length = 0;
+  for (const IndexKeySegment &segment : key_fields) {
+    attr_length += segment.length;
+  }
+
   if (internal_max_size < 0) {
     internal_max_size = calc_internal_page_capacity(attr_length);
   }
@@ -866,10 +906,17 @@ RC BplusTreeHandler::create(LogHandler &log_handler,
   IndexFileHeader *file_header   = (IndexFileHeader *)pdata;
   file_header->attr_length       = attr_length;
   file_header->key_length        = attr_length + sizeof(RID);
-  file_header->attr_type         = attr_type;
+  file_header->attr_type         = key_fields.front().type;
+  file_header->field_num         = static_cast<int32_t>(key_fields.size());
   file_header->internal_max_size = internal_max_size;
   file_header->leaf_max_size     = leaf_max_size;
   file_header->root_page         = BP_INVALID_PAGE_NUM;
+  memset(file_header->field_lengths, 0, sizeof(file_header->field_lengths));
+  memset(file_header->field_types, 0, sizeof(file_header->field_types));
+  for (size_t i = 0; i < key_fields.size() && i < static_cast<size_t>(MAX_INDEX_KEY_FIELDS); i++) {
+    file_header->field_lengths[i] = key_fields[i].length;
+    file_header->field_types[i]   = key_fields[i].type;
+  }
 
   // 取消记录日志的原因请参考下面的sync调用的地方。
   // mtr.logger().init_header_page(header_frame, *file_header);
@@ -886,8 +933,8 @@ RC BplusTreeHandler::create(LogHandler &log_handler,
     return RC::NOMEM;
   }
 
-  key_comparator_.init(file_header->attr_type, file_header->attr_length);
-  key_printer_.init(file_header->attr_type, file_header->attr_length);
+  key_comparator_.init(key_fields.data(), static_cast<int>(key_fields.size()));
+  key_printer_.init(key_fields.data(), static_cast<int>(key_fields.size()));
 
   /*
   虽然我们针对B+树记录了WAL，但是我们记录的都是逻辑日志，并没有记录某个页面如何修改的物理日志。
@@ -958,8 +1005,24 @@ RC BplusTreeHandler::open(LogHandler &log_handler, DiskBufferPool &buffer_pool)
   // close old page_handle
   buffer_pool.unpin_page(frame);
 
-  key_comparator_.init(file_header_.attr_type, file_header_.attr_length);
-  key_printer_.init(file_header_.attr_type, file_header_.attr_length);
+  // 从文件头中读取键值的字段信息，构建比较器（支持复合键）
+  IndexKeySegment key_segments[MAX_INDEX_KEY_FIELDS];
+  int             field_num = file_header_.field_num > 0 ? file_header_.field_num : 1;
+  if (file_header_.field_num <= 0) {
+    // 兼容旧格式的索引文件：只有一个字段
+    key_segments[0].type   = file_header_.attr_type;
+    key_segments[0].length = file_header_.attr_length;
+    file_header_.field_num = 1;
+    file_header_.field_lengths[0] = file_header_.attr_length;
+    file_header_.field_types[0]   = file_header_.attr_type;
+  } else {
+    for (int i = 0; i < field_num && i < MAX_INDEX_KEY_FIELDS; i++) {
+      key_segments[i].type   = file_header_.field_types[i];
+      key_segments[i].length = file_header_.field_lengths[i];
+    }
+  }
+  key_comparator_.init(key_segments, field_num);
+  key_printer_.init(key_segments, field_num);
   LOG_INFO("Successfully open index");
   return RC::SUCCESS;
 }

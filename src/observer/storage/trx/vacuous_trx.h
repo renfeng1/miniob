@@ -45,7 +45,11 @@ public:
 
   RC insert_record(Table *table, Record &record) override;
   RC delete_record(Table *table, Record &record) override;
-  RC update_record(Table *table, Record &old_record, Record &new_record) override { return RC::UNIMPLEMENTED; }
+  /// Vacuous事务没有并发控制，直接调用表引擎的更新接口完成更新
+  RC update_record(Table *table, Record &old_record, Record &new_record) override
+  {
+    return table->update_record_with_trx(old_record, new_record, this);
+  }
   RC visit_record(Table *table, Record &record, ReadWriteMode mode) override;
   RC start_if_need() override;
   RC commit() override;
