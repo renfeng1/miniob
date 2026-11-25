@@ -29,6 +29,15 @@ RC CharType::set_value_from_str(Value &val, const string &data) const
 RC CharType::cast_to(const Value &val, AttrType type, Value &result) const
 {
   switch (type) {
+    case AttrType::DATES: {
+      // 字符串转日期：解析 YYYY-MM-DD 格式，内部按 YYYYMMDD 整数存储
+      RC rc = DataType::type_instance(AttrType::DATES)->set_value_from_str(result, val.get_string());
+      if (OB_SUCC(rc)) {
+        // set_value_from_str 内部通过 set_int 设置值，类型会被置为 INTS，这里修正为 DATES
+        result.set_type(AttrType::DATES);
+      }
+      return rc;
+    }
     default: return RC::UNIMPLEMENTED;
   }
   return RC::SUCCESS;
@@ -38,6 +47,10 @@ int CharType::cast_cost(AttrType type)
 {
   if (type == AttrType::CHARS) {
     return 0;
+  }
+  // 字符串可以隐式转换为日期，代价略高
+  if (type == AttrType::DATES) {
+    return 2;
   }
   return INT32_MAX;
 }

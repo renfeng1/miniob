@@ -124,6 +124,11 @@ void Value::set_data(char *data, int length)
       value_.float_value_ = *(float *)data;
       length_             = length;
     } break;
+    case AttrType::DATES: {
+      // 日期以 YYYYMMDD 的 4 字节整数形式存储
+      value_.int_value_ = *(int *)data;
+      length_           = length;
+    } break;
     case AttrType::BOOLEANS: {
       value_.bool_value_ = *(int *)data != 0;
       length_            = length;
@@ -203,6 +208,10 @@ void Value::set_value(const Value &value)
     case AttrType::CHARS: {
       set_string(value.get_string().c_str());
     } break;
+    case AttrType::DATES: {
+      set_int(value.get_int());
+      attr_type_ = AttrType::DATES;
+    } break;
     case AttrType::BOOLEANS: {
       set_boolean(value.get_boolean());
     } break;
@@ -264,6 +273,9 @@ int Value::get_int() const
     case AttrType::FLOATS: {
       return (int)(value_.float_value_);
     }
+    case AttrType::DATES: {
+      return value_.int_value_;
+    }
     case AttrType::BOOLEANS: {
       return (int)(value_.bool_value_);
     }
@@ -291,6 +303,9 @@ float Value::get_float() const
     } break;
     case AttrType::FLOATS: {
       return value_.float_value_;
+    } break;
+    case AttrType::DATES: {
+      return float(value_.int_value_);
     } break;
     case AttrType::BOOLEANS: {
       return float(value_.bool_value_);
@@ -338,6 +353,9 @@ bool Value::get_boolean() const
     case AttrType::FLOATS: {
       float val = value_.float_value_;
       return val >= EPSILON || val <= -EPSILON;
+    } break;
+    case AttrType::DATES: {
+      return value_.int_value_ != 0;
     } break;
     case AttrType::BOOLEANS: {
       return value_.bool_value_;
